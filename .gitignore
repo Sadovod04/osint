@@ -1,0 +1,16 @@
+# отчёты содержат персональные данные — НЕ коммитить
+footprint_report.txt
+report*.txt
+*.report.txt
+*.output
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# редакторы / ОС
+.vscode/
+.idea/
+.DS_Store

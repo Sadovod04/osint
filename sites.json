@@ -1,0 +1,22 @@
+[
+  {"name": "GitHub",        "url": "https://github.com/{u}",                 "check": "status"},
+  {"name": "GitLab",        "url": "https://gitlab.com/{u}",                 "check": "status"},
+  {"name": "Reddit",        "url": "https://www.reddit.com/user/{u}/about.json", "check": "status"},
+  {"name": "Instagram",     "url": "https://www.instagram.com/{u}/",         "check": "status"},
+  {"name": "Twitter/X",     "url": "https://twitter.com/{u}",                "check": "status"},
+  {"name": "Telegram",      "url": "https://t.me/{u}",                       "check": "text", "absent": "tgme_page_title"},
+  {"name": "TikTok",        "url": "https://www.tiktok.com/@{u}",            "check": "status"},
+  {"name": "VK",            "url": "https://vk.com/{u}",                     "check": "text", "absent": "\"error\""},
+  {"name": "Pinterest",     "url": "https://www.pinterest.com/{u}/",         "check": "status"},
+  {"name": "Medium",        "url": "https://medium.com/@{u}",                "check": "status"},
+  {"name": "Habr",          "url": "https://habr.com/ru/users/{u}/",         "check": "status"},
+  {"name": "Steam",         "url": "https://steamcommunity.com/id/{u}",      "check": "text", "absent": "The specified profile could not be found"},
+  {"name": "Twitch",        "url": "https://www.twitch.tv/{u}",              "check": "status"},
+  {"name": "SoundCloud",    "url": "https://soundcloud.com/{u}",             "check": "status"},
+  {"name": "Dev.to",        "url": "https://dev.to/{u}",                     "check": "status"},
+  {"name": "PyPI",          "url": "https://pypi.org/user/{u}/",             "check": "status"},
+  {"name": "Docker Hub",    "url": "https://hub.docker.com/u/{u}",           "check": "status"},
+  {"name": "Keybase",       "url": "https://keybase.io/{u}",                 "check": "status"},
+  {"name": "HackerNews",    "url": "https://news.ycombinator.com/user?id={u}", "check": "text", "absent": "No such user."},
+  {"name": "Behance",       "url": "https://www.behance.net/{u}",            "check": "status"}
+]
