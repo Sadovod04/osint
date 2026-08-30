@@ -441,8 +441,9 @@ def deletion_hint(service: str, dmap: dict) -> str:
     for key in (s, root, base):
         if key in dmap:
             return dmap[key]
+    # нестрогое совпадение — только по длинным ключам, чтобы "x" не цеплял "xbox"
     for k, v in dmap.items():
-        if k in s or k in base or base in k:
+        if len(k) >= 5 and (k in base or base in k):
             return v
     q = urllib.parse.quote(f"как удалить аккаунт {service}")
     return f"(нет в базе) https://www.google.com/search?q={q}"
