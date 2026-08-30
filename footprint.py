@@ -29,6 +29,9 @@ import json
 import re
 import shutil
 import subprocess
+import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -53,6 +56,60 @@ _DATA_BROKERS = [
     ("FastPeopleSearch", "https://www.fastpeoplesearch.com/removal"),
     ("Google 'Результаты о вас'", "https://myactivity.google.com/results-about-you"),
 ]
+
+
+# --- Таймер (живой отсчёт в терминале с момента запуска) -----------------
+
+class Ticker:
+    """Печатает [ЧЧ:ММ:СС] <фаза> в stderr, обновляясь раз в секунду."""
+
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled
+        self.phase = "старт"
+        self._stop = threading.Event()
+        self._thr: threading.Thread | None = None
+        self._t0 = 0.0
+        self._tty = sys.stderr.isatty()
+
+    @staticmethod
+    def _fmt(sec: float) -> str:
+        s = int(sec)
+        return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+    def _loop(self):
+        last_line = 0.0
+        while not self._stop.wait(1.0):
+            el = time.monotonic() - self._t0
+            if self._tty:
+                sys.stderr.write(f"\r\033[K[{self._fmt(el)}] {self.phase}")
+                sys.stderr.flush()
+            elif el - last_line >= 20:          # в файл/пайп — строкой раз в 20с
+                last_line = el
+                sys.stderr.write(f"[{self._fmt(el)}] {self.phase}\n")
+                sys.stderr.flush()
+
+    def start(self):
+        if not self.enabled:
+            return
+        self._t0 = time.monotonic()
+        self._thr = threading.Thread(target=self._loop, daemon=True)
+        self._thr.start()
+
+    def set(self, phase: str):
+        self.phase = phase
+        if self.enabled and self._tty:
+            el = time.monotonic() - self._t0
+            sys.stderr.write(f"\r\033[K[{self._fmt(el)}] {phase}")
+            sys.stderr.flush()
+
+    def stop(self):
+        if not self.enabled or not self._thr:
+            return
+        self._stop.set()
+        self._thr.join(timeout=2)
+        el = time.monotonic() - self._t0
+        sys.stderr.write(f"\r\033[K[{self._fmt(el)}] завершено за {self._fmt(el)}\n")
+        sys.stderr.flush()
 
 
 # --- HTTP -----------------------------------------------------------------
@@ -498,13 +555,16 @@ def vk_self_visibility(token: str, timeout: float) -> dict:
 
 # --- Оркестрация -----------------------------------------------------
 
-def run(args) -> dict:
+def run(args, tk: "Ticker | None" = None) -> dict:
+    if tk is None:
+        tk = Ticker(enabled=False)
     r: dict = {
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "input": {k: v for k, v in dict(email=args.email, username=args.username,
                                         phone=args.phone, name=args.name).items() if v},
     }
     if args.phone:
+        tk.set("разбор телефона")
         r["phone_analysis"] = analyze_phone(args.phone)
     r["search_queries"] = build_queries(args.email, args.username, args.phone, args.name)
 
@@ -513,8 +573,10 @@ def run(args) -> dict:
         return r
 
     if args.email:
+        tk.set("gravatar + HIBP")
         r["gravatar"] = gravatar(args.email, args.timeout)
         r["hibp"] = hibp(args.email, args.hibp_key or "", args.timeout)
+        tk.set("holehe (регистрация почты на сервисах)")
         r["holehe"] = holehe_scan(args.email, args.ext_timeout)
     variants = username_variants(args.username, args.name, args.email, args.max_variants)
     if args.variants:
@@ -524,11 +586,16 @@ def run(args) -> dict:
                 variants.append(v)
     if variants:
         r["username_variants"] = variants
+        mode = "полный список ~3300" if args.full else "топ-509"
+        tk.set(f"maigret [{mode}, {len(variants)} ников"
+               f"{', +permute' if args.permute else ''}] — самое долгое")
         r["maigret"] = maigret_scan(variants, args.ext_timeout, full=args.full,
                                     proxy=args.proxy, permute=args.permute)
         if r["maigret"] is None:  # maigret не установлен — свой скан по первому нику
+            tk.set("встроенный username-скан")
             r["username_scan"] = username_scan(variants[0], args.timeout, args.workers)
     if args.vk_token:
+        tk.set("VK — видимость профиля")
         r["vk_self"] = vk_self_visibility(args.vk_token, args.timeout)
 
     # сводим всё найденное в чек-лист удаления (группируем по сервису)
@@ -543,9 +610,11 @@ def run(args) -> dict:
     if args.site:
         wb_urls.append(f"http://{_clean_domain(args.site)}")
     if wb_urls:
+        tk.set(f"Wayback ({len(wb_urls)} url)")
         r["wayback"] = wayback_scan(wb_urls, args.timeout, args.workers)
 
     if args.site:
+        tk.set(f"домен {args.site} — crt.sh, DNS")
         r["domain"] = domain_recon(args.site, args.timeout)
 
     return r
@@ -734,12 +803,19 @@ def main(argv=None) -> int:
                    help="Таймаут maigret/holehe целиком, сек (для --full ставь больше).")
     p.add_argument("--workers", type=int, default=10)
     p.add_argument("--json", action="store_true", help="Также вывести JSON в stdout.")
+    p.add_argument("--no-timer", dest="no_timer", action="store_true",
+                   help="Не показывать таймер [ЧЧ:ММ:СС] в терминале.")
     args = p.parse_args(argv)
 
     if not any([args.email, args.username, args.phone, args.name, args.vk_token]):
         p.error("нужен хотя бы один из --email/--username/--phone/--name/--vk-token")
 
-    result = run(args)
+    tk = Ticker(enabled=not args.no_timer)
+    tk.start()
+    try:
+        result = run(args, tk)
+    finally:
+        tk.stop()
     report = render_report(result)
 
     out_path = Path(args.out)
