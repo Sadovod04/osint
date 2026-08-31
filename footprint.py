@@ -449,23 +449,24 @@ def domain_recon(domain: str, timeout: float) -> dict:
 
 def parse_found_accounts(r: dict) -> list[dict]:
     """Собирает из вывода maigret/holehe/встроенного скана список
-    {service, url} — реально существующие аккаунты."""
+    {service, url, source} — реально существующие аккаунты.
+    source: 'email' (holehe) | 'nick' (maigret) | 'scan' (встроенный)."""
     import re
     found: list[dict] = []
     seen: set = set()
 
-    def add(service: str, url: str):
+    def add(service: str, url: str, source: str):
         key = (service.lower(), url)
         if key not in seen:
             seen.add(key)
-            found.append({"service": service, "url": url})
+            found.append({"service": service, "url": url, "source": source})
 
     mg = r.get("maigret")
     if isinstance(mg, str):
         for ln in mg.splitlines():
             m = re.match(r"^\[\+\]\s+(.+?):\s+(https?://\S+)", ln.strip())
             if m:
-                add(m.group(1).strip(), m.group(2).strip())
+                add(m.group(1).strip(), m.group(2).strip(), "nick")
 
     ho = r.get("holehe")
     if isinstance(ho, str):
@@ -473,11 +474,11 @@ def parse_found_accounts(r: dict) -> list[dict]:
             m = re.match(r"^\[\+\]\s+([a-z0-9][a-z0-9.\-]+\.[a-z]{2,})\s*$", ln.strip(), re.I)
             if m:
                 dom = m.group(1).lower()
-                add(dom, f"https://{dom}")
+                add(dom, f"https://{dom}", "email")
 
     for row in r.get("username_scan", []):
         if row.get("found"):
-            add(row["site"], row["url"])
+            add(row["site"], row["url"], "scan")
 
     return found
 
@@ -631,15 +632,79 @@ def render_report(r: dict) -> str:
     add("=" * 60)
 
     accs = r.get("found_accounts") or []
+    by_email = [a for a in accs if a.get("source") == "email"]
+    by_nick = [a for a in accs if a.get("source") == "nick"]
+    by_scan = [a for a in accs if a.get("source") == "scan"]
+    pa = r.get("phone_analysis") or {}
+    g = r.get("gravatar") or {}
+    h = r.get("hibp") or {}
+
+    def _table(rows: list[dict]):
+        w = max((len(a["service"]) for a in rows), default=0)
+        for a in rows:
+            add(f"  [+] {a['service']:<{w}}  {a['url']}")
+
+    # --- СВОДКА -------------------------------------------------------
+    add("\n[СВОДКА]")
+    add(f"  Аккаунтов:  {len(accs)}   "
+        f"(по нику: {len(by_nick)}, по почте: {len(by_email)}"
+        + (f", встроенный скан: {len(by_scan)}" if by_scan else "") + ")")
+    if pa:
+        add("  Телефон:    " + (
+            f"{pa.get('e164') or '—'} — {pa.get('carrier') or '?'}, "
+            f"{pa.get('country') or '?'}, {pa.get('line_type')}"
+            if pa.get("parsed") else f"не разобран ({pa.get('reason')})"))
+    if h:
+        if not h.get("checked"):
+            add(f"  Утечки:     не проверялись ({h.get('reason')})")
+        elif h.get("breached"):
+            add(f"  Утечки:     {len(h.get('breaches') or [])} (HIBP) — см. ниже")
+        elif "error" in h:
+            add(f"  Утечки:     ошибка HIBP ({h['error']})")
+        else:
+            add("  Утечки:     не найдено (HIBP)")
+    if g:
+        add(f"  Gravatar:   {'публичный профиль есть' if g.get('has_public_avatar') else 'нет'}")
+
+    # --- ГДЕ ЗАРЕГИСТРИРОВАНА ПОЧТА --------------------------------
+    if "holehe" in r or by_email:
+        email = r["input"].get("email", "")
+        add(f"\n[ПО E-MAIL]  {email}   (holehe — механика «восстановить пароль»)")
+        if r.get("holehe") is None:
+            add("  holehe не установлен: pipx install holehe")
+        elif by_email:
+            _table(by_email)
+        else:
+            add("  регистраций не найдено")
+
+    # --- ГДЕ ЕСТЬ АККАУНТ ПО НИКУ ---------------------------------
+    if "maigret" in r or by_nick:
+        add("\n[ПО НИКУ]   (maigret)")
+        if r.get("username_variants"):
+            add(f"  варианты: {', '.join(r['username_variants'])}")
+        if r.get("maigret") is None:
+            add("  maigret не установлен: pipx install maigret")
+        elif by_nick:
+            _table(by_nick)
+        else:
+            add("  аккаунтов не найдено")
+
+    if "username_scan" in r:
+        add("\n[ВСТРОЕННЫЙ СКАН]  (fallback без maigret, ~20 сайтов)")
+        hit = [row for row in r["username_scan"] if row.get("found")]
+        noans = [row for row in r["username_scan"] if row.get("found") is None]
+        _table([{"service": row["site"], "url": row["url"]} for row in hit])
+        for row in noans:
+            add(f"  [?] {row['site']:<14}  {row['url']}  (не ответил)")
+
+    # --- ЧЕК-ЛИСТ УДАЛЕНИЯ ---------------------------------------
     if accs:
-        add(f"\n[ЧЕК-ЛИСТ УДАЛЕНИЯ]  найдено аккаунтов: {len(accs)}")
-        add("  (проверь каждую ссылку глазами — бывают ложные совпадения)")
+        add(f"\n[ЧЕК-ЛИСТ УДАЛЕНИЯ]  {len(accs)} шт.  (сверь каждую ссылку глазами)")
         for i, a in enumerate(accs, 1):
-            add(f"  {i:>2}. {a['service']}")
+            add(f"  {i:>2}. {a['service']}  ({a.get('source', '?')})")
             add(f"      профиль:  {a['url']}")
             add(f"      удалить:  {a.get('delete_via', '—')}")
 
-    pa = r.get("phone_analysis")
     if pa:
         add("\n[ТЕЛЕФОН]")
         if pa.get("parsed"):
@@ -653,18 +718,6 @@ def render_report(r: dict) -> str:
         else:
             add(f"  не разобран: {pa.get('reason')}")
 
-    g = r.get("gravatar")
-    if g:
-        add("\n[GRAVATAR]")
-        add(f"  Публичный аватар: {'да' if g['has_public_avatar'] else 'нет'}")
-        if g.get("avatar_url"):
-            add(f"  {g['avatar_url']}")
-        if g.get("profile"):
-            e = (g["profile"].get("entry") or [{}])[0]
-            add(f"  Имя в профиле: {e.get('displayName') or '—'}")
-            add(f"  Профиль: {e.get('profileUrl') or '—'}")
-
-    h = r.get("hibp")
     if h:
         add("\n[УТЕЧКИ — HaveIBeenPwned]")
         if not h.get("checked"):
@@ -680,21 +733,14 @@ def render_report(r: dict) -> str:
         else:
             add("  не найдено")
 
-    if "holehe" in r:
-        add("\n[HOLEHE — регистрация почты на сервисах]")
-        add(_indent(r["holehe"], "не установлен: pip install holehe"))
-
-    if "maigret" in r:
-        add("\n[MAIGRET — username по сайтам]")
-        if r.get("username_variants"):
-            add(f"  варианты ника: {', '.join(r['username_variants'])}")
-        add(_indent(r["maigret"], "не установлен: pip install maigret"))
-
-    if "username_scan" in r:
-        add("\n[ВСТРОЕННЫЙ USERNAME-СКАН]  (fallback, ~20 сайтов, возможны ложные [+])")
-        for row in r["username_scan"]:
-            mark = {True: "[+]", False: "[ ]", None: "[?]"}[row["found"]]
-            add(f"  {mark} {row['site']:<14} {row['url']}")
+    if g and (g.get("has_public_avatar") or g.get("profile")):
+        add("\n[GRAVATAR]")
+        if g.get("avatar_url"):
+            add(f"  {g['avatar_url']}")
+        if g.get("profile"):
+            e = (g["profile"].get("entry") or [{}])[0]
+            add(f"  Имя в профиле: {e.get('displayName') or '—'}")
+            add(f"  Профиль: {e.get('profileUrl') or '—'}")
 
     vk = r.get("vk_self")
     if vk:
@@ -741,15 +787,13 @@ def render_report(r: dict) -> str:
         if dom.get("wayback"):
             add(f"  wayback: {dom['wayback']['snapshot']}")
 
-    add("\n[ПОИСКОВЫЕ ЗАПРОСЫ]  (прогони вручную; движки: "
-        + ", ".join(r["search_queries"].get("engines", ["google"])) + ")")
-    sq = r["search_queries"]
-    for cat, items in sq["dorks"].items():
-        add(f"  {cat}:")
-        for i, s in enumerate(items):
-            add(f"    {s}")
-            for eng in sq.get("engines", ["google"]):
-                add(f"      {eng:<7} {sq['links'][cat][eng][i]}")
+    sq = r.get("search_queries") or {}
+    if sq.get("dorks"):
+        add("\n[ПОИСКОВЫЕ ЗАПРОСЫ]  (скопируй строку в любой поисковик)")
+        for cat, items in sq["dorks"].items():
+            add(f"  {cat}:")
+            for s in items:
+                add(f"    {s}")
 
     add("\n[КАК УДАЛЯТЬ — ОБЩЕЕ]")
     add("  - Аккаунты выше: залогинься → настройки → удалить/деактивировать.")
@@ -767,12 +811,6 @@ def render_report(r: dict) -> str:
         add(f"\n{r['note']}")
     add("")
     return "\n".join(L)
-
-
-def _indent(text: str | None, missing_msg: str) -> str:
-    if text is None:
-        return f"  {missing_msg}"
-    return "\n".join("  " + ln for ln in text.splitlines())
 
 
 # --- CLI ------------------------------------------------------------
