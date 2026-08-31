@@ -156,20 +156,43 @@ def run_external(cmd: list[str], timeout: float) -> str | None:
 
 
 def maigret_scan(usernames: list[str], timeout: float, full: bool = False,
-                 proxy: str | None = None, permute: bool = False) -> str | None:
-    # maigret по умолчанию печатает только найденные аккаунты в stdout;
-    # --folderoutput уводит файловые отчёты в /tmp, чтобы не мусорить в папке.
+                 proxy: str | None = None, permute: bool = False,
+                 top_sites: int = 500, site_timeout: int = 10,
+                 workers: int = 4) -> str | None:
+    """Гоняет maigret по каждому нику ОТДЕЛЬНЫМ процессом и параллельно —
+    так N ников идут одновременно, а не в очередь (главное ускорение).
+      * top_sites   — сколько самых популярных сайтов (игнор при full)
+      * site_timeout — таймаут одного HTTP внутри maigret
+      * timeout     — общий потолок на один процесс maigret
+    """
     import tempfile
-    cmd = ["maigret", *usernames, "--no-progressbar", "--no-recursion",
-           "--timeout", "15", "--no-color",
-           "--folderoutput", tempfile.gettempdir()]
-    if full:
-        cmd.append("-a")  # весь список сайтов (~3300) вместо топ-509
-    if permute:
-        cmd.append("--permute")  # перестановки/склейки переданных ников
-    if proxy:
-        cmd += ["--proxy", proxy]
-    return run_external(cmd, timeout)
+    if shutil.which("maigret") is None:
+        return None
+
+    def one(user: str) -> str:
+        # --folderoutput уводит файловые отчёты в /tmp, чтобы не мусорить в папке
+        cmd = ["maigret", user, "--no-progressbar", "--no-recursion",
+               "--timeout", str(site_timeout), "--retries", "1", "--no-color",
+               "--folderoutput", tempfile.gettempdir()]
+        if full:
+            cmd.append("-a")  # весь список сайтов (~3300)
+        elif top_sites:
+            cmd += ["--top-sites", str(top_sites)]
+        if permute:
+            cmd.append("--permute")  # перестановки/склейки частей ника
+        if proxy:
+            cmd += ["--proxy", proxy]
+        return run_external(cmd, timeout) or ""
+
+    if len(usernames) == 1:
+        return one(usernames[0]) or "(пустой вывод)"
+
+    parts: list[str] = []
+    with cf.ThreadPoolExecutor(max_workers=min(workers, len(usernames))) as ex:
+        for user, out in zip(usernames, ex.map(one, usernames)):
+            if out.strip():
+                parts.append(f"# {user}\n{out}")
+    return "\n".join(parts) if parts else "(пустой вывод)"
 
 
 # --- Варианты ника ------------------------------------------------------
@@ -587,11 +610,14 @@ def run(args, tk: "Ticker | None" = None) -> dict:
                 variants.append(v)
     if variants:
         r["username_variants"] = variants
-        mode = "полный список ~3300" if args.full else "топ-509"
-        tk.set(f"maigret [{mode}, {len(variants)} ников"
-               f"{', +permute' if args.permute else ''}] — самое долгое")
+        mode = "полный список ~3300" if args.full else f"топ-{args.top_sites}"
+        tk.set(f"maigret [{mode}, {len(variants)} ников параллельно"
+               f"{', +permute' if args.permute else ''}]")
         r["maigret"] = maigret_scan(variants, args.ext_timeout, full=args.full,
-                                    proxy=args.proxy, permute=args.permute)
+                                    proxy=args.proxy, permute=args.permute,
+                                    top_sites=args.top_sites,
+                                    site_timeout=args.site_timeout,
+                                    workers=args.maigret_workers)
         if r["maigret"] is None:  # maigret не установлен — свой скан по первому нику
             tk.set("встроенный username-скан")
             r["username_scan"] = username_scan(variants[0], args.timeout, args.workers)
@@ -828,7 +854,14 @@ def main(argv=None) -> int:
     p.add_argument("--max-variants", dest="max_variants", type=int, default=6,
                    help="Сколько авто-вариантов ника генерить (из имени/почты).")
     p.add_argument("--permute", action="store_true",
-                   help="maigret перебирает перестановки/склейки переданных ников.")
+                   help="maigret перебирает перестановки/склейки переданных ников (медленно, шумно).")
+    p.add_argument("--top-sites", dest="top_sites", type=int, default=500,
+                   help="maigret: сколько самых популярных сайтов (по умолч. 500; "
+                        "ставь 100–150 для быстрого прогона). Игнорируется при --full.")
+    p.add_argument("--site-timeout", dest="site_timeout", type=int, default=10,
+                   help="Таймаут одного HTTP-запроса внутри maigret, сек (по умолч. 10).")
+    p.add_argument("--maigret-workers", dest="maigret_workers", type=int, default=4,
+                   help="Сколько вариантов ника гнать через maigret одновременно (по умолч. 4).")
     p.add_argument("--site", help="Твой домен — разведка: crt.sh, DNS, Wayback.")
     p.add_argument("--proxy", help="Прокси для maigret, напр. socks5://127.0.0.1:9050")
     p.add_argument("--hibp-key", dest="hibp_key", help="API-ключ HaveIBeenPwned.")
